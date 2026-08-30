@@ -166,7 +166,7 @@ fillRelease  → doFillRelease    填充发布信息并提交
 ```js
 const t = unsafeWindow.XMWToolbox;
 
-t.version;                       // "2.0.0" 当前脚本版本
+t.version;                       // "2.1.0" 当前脚本版本
 t.settings.define(defs);         // 注册一组设置项（见 3.3 的 def 结构）
 t.settings.get(key);             // 读取设置值
 t.settings.set(key, value);      // 写入设置值（触发 onChange）

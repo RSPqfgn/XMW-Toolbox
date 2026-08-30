@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         XMW Toolbox
-// @version      2.0.0
+// @version      2.1.0
 // @description  使你的小码王更易于使用
 // @author       RSPqfgn
 // @match        https://world.xiaomawang.com/*
@@ -12,6 +12,8 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_registerMenuCommand
 // @grant        unsafeWindow
+// @require      https://cdn.jsdelivr.net/npm/marked@12/marked.min.js
+// @require      https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js
 // @updateURL    https://raw.githubusercontent.com/RSPqfgn/XMW-Toolbox/main/XMW%20Toolbox.user.js
 // @downloadURL  https://raw.githubusercontent.com/RSPqfgn/XMW-Toolbox/main/XMW%20Toolbox.user.js
 // @run-at       document-idle
@@ -55,10 +57,7 @@
         license: 'GNU GPLv3',
         repo: 'https://github.com/RSPqfgn/XMW-Toolbox',
         issues: 'https://github.com/RSPqfgn/XMW-Toolbox/issues',
-        friendLinks: [
-            { label: '小码王Plus', url: 'https://github.com/RSPqfgn/XMWplus' },
-            { label: 'XMWmax', url: 'https://github.com/RSPqfgn/XMWmax' },
-        ],
+        authorLink: 'https://github.com/RSPqfgn/',
     };
 
     const ORIGIN = 'https://world.xiaomawang.com';
@@ -90,6 +89,9 @@
         // 查询功能解析页面时使用
         pageErrorA: '.title__3aW-0',
         pageErrorB: '.title__3tuHf',
+        // Markdown 功能使用
+        commentText: '[class*="comment-text"]',
+        introItem: '[class*="intro-item"]',
     };
 
     /* 任务中心操作按钮的 class 片段（类名含构建哈希，取稳定部分匹配） */
@@ -199,6 +201,139 @@
         el.dispatchEvent(new Event('input', { bubbles: true }));
         el.dispatchEvent(new Event('change', { bubbles: true }));
     }
+
+    /* 共享的视口可见性观察器：元素进入屏幕后执行一次回调 */
+    const visibleCallbacks = new WeakMap();
+    const visibilityObserver = new IntersectionObserver(entries => {
+        for (const entry of entries) {
+            if (!entry.isIntersecting) continue;
+            visibilityObserver.unobserve(entry.target);
+            visibleCallbacks.get(entry.target)?.(entry.target);
+        }
+    }, { threshold: 0.5 });
+
+    /** 等元素在屏幕中可见后再执行回调（用于「更多评论」等按需加载按钮，避免连锁展开导致页面卡顿） */
+    function whenVisible(el, callback) {
+        visibleCallbacks.set(el, callback);
+        visibilityObserver.observe(el);
+    }
+
+    /* ==========================================================
+     * Markdown（marked + DOMPurify 由 @require 提供）
+     * ======================================================== */
+
+    /** 将裸 URL 转为显式 Markdown 链接。marked 的 GFM 自动链接会把 URL 后
+     *  紧跟的中文一并识别进链接，这里手动按 ASCII 边界截取。前置字符排除
+     *  引号 / 等号 / 尖括号 / 圆括号 / 方括号 / 反引号，避免破坏已有的
+     *  [文本](链接)、<autolink>、HTML 属性和行内代码 */
+    function autolinkBareUrls(text) {
+        return text.replace(/(^|[^"'=<([`])(https?:\/\/[A-Za-z0-9\-._~:/?#@!$&*+,;=%]+)/gm,
+            (m, pre, url) => {
+                const link = url.replace(/[.,;:!?*_~'"]+$/, '');  // 句末标点不属于链接
+                return `${pre}[${link}](${link})`;
+            });
+    }
+
+    /** 只有一段时去掉 <p> 包裹：评论区正文多为单段文本，保留 <p> 会引入
+     *  原有布局没有的段间距，看起来像多了一个空行 */
+    function unwrapSingleParagraph(html) {
+        return html.replace(/^<p>((?:(?!<\/p>)[\s\S])*)<\/p>\s*$/, '$1');
+    }
+
+    /** 将 Markdown 文本渲染为安全 HTML（marked 解析 + DOMPurify 消毒，防 XSS） */
+    function renderMarkdown(text) {
+        const html = marked.parse(autolinkBareUrls(text ?? ''), { gfm: true, breaks: true });
+        return unwrapSingleParagraph(DOMPurify.sanitize(html));
+    }
+
+    /** 渲染元素内的 Markdown；元素的子节点（"置顶"角标、表情图片等）原样
+     *  保留，不会因取 textContent 而丢失标签和样式 */
+    function renderElementMarkdown(el) {
+        // 子元素替换为占位符文本参与解析，渲染后再原位换回
+        const tokens = [...el.children].map((child, i) => {
+            const token = `xmwmd${i}x`;
+            child.replaceWith(document.createTextNode(token));
+            return [token, child];
+        });
+        el.classList.add('xmw-md-body');
+        el.innerHTML = renderMarkdown(el.textContent);
+        for (const [token, child] of tokens) restoreToken(el, token, child);
+        el.dataset.xmwMdRendered = '1';
+    }
+
+    /** 把占位符文本替换回对应的元素节点 */
+    function restoreToken(root, token, element) {
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+        const targets = [];
+        while (walker.nextNode()) {
+            if (walker.currentNode.textContent.includes(token)) targets.push(walker.currentNode);
+        }
+        for (const node of targets) {
+            const text = node.textContent;
+            const idx = text.indexOf(token);
+            const frag = document.createDocumentFragment();
+            if (idx > 0) frag.append(document.createTextNode(text.slice(0, idx)));
+            frag.append(element);
+            if (idx + token.length < text.length) frag.append(document.createTextNode(text.slice(idx + token.length)));
+            node.replaceWith(frag);
+        }
+    }
+
+    /* Markdown 功能的页面级样式（渲染内容在站点 DOM 内，Shadow DOM 隔离不到） */
+    const PAGE_CSS = `
+        /* white-space 强制正常：评论区容器多为 pre-wrap，会把 marked 输出中
+           块级标签之间的换行文本节点渲染成多余空行；Markdown 的换行已由
+           breaks: true 转成 <br>，无需保留原始空白 */
+        .xmw-md-body { line-height: 1.7; word-break: break-word; white-space: normal; }
+        .xmw-md-body > :first-child { margin-top: 0; }
+        .xmw-md-body > :last-child { margin-bottom: 0; }
+        .xmw-md-body h1, .xmw-md-body h2, .xmw-md-body h3,
+        .xmw-md-body h4, .xmw-md-body h5, .xmw-md-body h6 { margin: 0.6em 0 0.4em; line-height: 1.4; }
+        .xmw-md-body h1 { font-size: 1.5em; }
+        .xmw-md-body h2 { font-size: 1.3em; }
+        .xmw-md-body h3 { font-size: 1.15em; }
+        .xmw-md-body p { margin: 0.4em 0; }
+        .xmw-md-body code { padding: 0.15em 0.4em; border-radius: 4px; background: rgba(0, 0, 0, 0.06); font-size: 0.9em; font-family: Consolas, Monaco, 'Courier New', monospace; }
+        .xmw-md-body pre { margin: 0.6em 0; padding: 0.8em 1em; border-radius: 8px; background: rgba(0, 0, 0, 0.06); overflow-x: auto; }
+        .xmw-md-body pre code { padding: 0; background: none; }
+        .xmw-md-body blockquote { margin: 0.6em 0; padding: 0.2em 1em; border-left: 3px solid #ffa31a; border-radius: 2px; background: rgba(255, 163, 26, 0.08); color: #666; }
+        .xmw-md-body ul, .xmw-md-body ol { margin: 0.4em 0; padding-left: 1.6em; }
+        .xmw-md-body img { max-width: 100%; border-radius: 8px; }
+        .xmw-md-body a { color: #e88b00; }
+        .xmw-md-body hr { margin: 1em 0; border: none; border-top: 1px solid rgba(0, 0, 0, 0.12); }
+        .xmw-md-body table { margin: 0.6em 0; border-collapse: collapse; }
+        .xmw-md-body th, .xmw-md-body td { padding: 0.3em 0.7em; border: 1px solid rgba(0, 0, 0, 0.15); }
+
+        .xmw-mde-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; margin-bottom: 4px; }
+        .xmw-mde-btn { padding: 5px 8px; border: none; border-radius: 6px; background: transparent; color: #666; font-size: 13px; line-height: 1; cursor: pointer; transition: background 0.2s ease, color 0.2s ease; }
+        .xmw-mde-btn:hover { background: rgba(255, 163, 26, 0.12); color: #e88b00; }
+        .xmw-mde-toggle { margin-left: auto; font-weight: 600; }
+        .xmw-mde-toggle.xmw-mde-active { background: rgba(255, 163, 26, 0.18); color: #e88b00; }
+        .xmw-mde-preview { margin-bottom: 4px; padding: 8px 12px; border: 1px solid rgba(0, 0, 0, 0.1); border-radius: 8px; background: rgba(0, 0, 0, 0.02); max-height: 400px; overflow-y: auto; }
+    `;
+
+    let pageCssInjected = false;
+    /** 向页面注入 Markdown 相关样式（一次性） */
+    function injectPageCss() {
+        if (pageCssInjected) return;
+        pageCssInjected = true;
+        document.head.append(h('style', { id: 'xmw-md-style' }, PAGE_CSS));
+    }
+
+    /* Markdown 编辑器工具栏动作 */
+    const MDE_ACTIONS = [
+        { label: 'B', title: '粗体', style: 'font-weight:700', left: '**', right: '**' },
+        { label: 'I', title: '斜体', style: 'font-style:italic', left: '*', right: '*' },
+        { label: 'S', title: '删除线', style: 'text-decoration:line-through', left: '~~', right: '~~' },
+        { label: '‹/›', title: '行内代码', left: '`', right: '`' },
+        { label: '{ }', title: '代码块', left: '\n```\n', right: '\n```\n' },
+        { label: '链接', title: '链接', left: '[', right: '](https://)' },
+        { label: '图片', title: '图片', left: '![', right: '](图片链接)' },
+        { label: '引用', title: '引用', line: '> ' },
+        { label: '• 列表', title: '无序列表', line: '- ' },
+        { label: '1. 列表', title: '有序列表', line: '1. ' },
+        { label: 'H', title: '标题', line: '## ' },
+    ];
 
     /** 点击任务中心所有「领取」按钮，直到无剩余或超时，返回点击次数 */
     async function clickAllReceiveButtons({ timeout = 6000 } = {}) {
@@ -614,6 +749,7 @@
         .xt-select:focus { border-color: #3370ff; box-shadow: 0 0 0 3px rgba(51, 112, 255, 0.12); }
         .xt-about-row { display: flex; gap: 8px; padding: 6px 2px; }
         .xt-about-row__label { color: #8f959e; flex-shrink: 0; }
+        .xt-about-title { margin: 2px 2px 10px; font-size: 22px; font-weight: 700; letter-spacing: 0.5px; }
 
         /* ---------- 查询面板 ---------- */
         .xt-query-row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
@@ -828,7 +964,7 @@
         },
     };
 
-    Settings.defineGroup({ id: 'tasks', label: '自动任务' });
+    Settings.defineGroup({ id: 'tasks', label: '自动化' });
     Settings.defineGroup({ id: 'appearance', label: '界面定制' });
 
     /* ---------- 自动领取奖励 ---------- */
@@ -865,11 +1001,11 @@
         id: 'auto-load-comments',
         settings: [{
             key: 'autoLoadComments', group: 'tasks', label: '自动展开评论',
-            desc: '自动点击"更多评论"按钮', default: true, reload: true,
+            desc: '"更多评论"按钮进入屏幕后自动点击', default: true, reload: true,
         }],
         setup() {
             if (!Settings.get('autoLoadComments')) return;
-            Watcher.watch(SELECTORS.moreComments, el => el.click(), { cooldown: 900 });
+            Watcher.watch(SELECTORS.moreComments, el => whenVisible(el, target => target.click()), { cooldown: 900 });
         },
     });
 
@@ -878,11 +1014,11 @@
         id: 'auto-expand-replies',
         settings: [{
             key: 'autoExpandReplies', group: 'tasks', label: '自动展开子回复',
-            desc: '自动点击"展开更多回复"按钮', default: false, reload: true,
+            desc: '"展开更多回复"按钮进入屏幕后自动点击', default: false, reload: true,
         }],
         setup() {
             if (!Settings.get('autoExpandReplies')) return;
-            Watcher.watch(SELECTORS.moreReplies, el => el.click(), { cooldown: 900 });
+            Watcher.watch(SELECTORS.moreReplies, el => whenVisible(el, target => target.click()), { cooldown: 900 });
         },
     });
 
@@ -978,34 +1114,17 @@
         id: 'adaptive-textbox',
         settings: [{
             key: 'adaptiveTextbox', group: 'appearance', label: '自适应文本框',
-            desc: '输入框宽度、文本域高度随内容自动调整', default: false, reload: true,
+            desc: '文本域高度随内容自动调整', default: false, reload: true,
         }],
         setup() {
             if (!Settings.get('adaptiveTextbox')) return;
-            const measurer = h('span', {
-                style: {
-                    position: 'absolute', visibility: 'hidden',
-                    whiteSpace: 'pre', height: 'auto', width: 'auto',
-                },
-            });
-            document.body.append(measurer);
 
             function adjust(el) {
-                if (el.tagName === 'TEXTAREA') {
-                    el.style.height = 'auto';
-                    el.style.height = `${el.scrollHeight}px`;
-                } else if (el.tagName === 'INPUT' && el.type === 'text') {
-                    const style = getComputedStyle(el);
-                    measurer.style.font = style.font;
-                    measurer.style.padding = style.padding;
-                    measurer.textContent = el.value || el.placeholder;
-                    const minWidth = parseInt(style.minWidth, 10) || 100;
-                    el.style.width = `${Math.max(minWidth, measurer.offsetWidth + 20)}px`;
-                    el.style.transition = 'width 0.2s ease';
-                }
+                el.style.height = 'auto';
+                el.style.height = `${el.scrollHeight}px`;
             }
 
-            Watcher.watch('textarea, input[type="text"]', el => {
+            Watcher.watch('textarea', el => {
                 if (el.dataset.xmwAdaptiveBound) return;
                 el.dataset.xmwAdaptiveBound = '1';
                 el.addEventListener('input', () => adjust(el));
@@ -1013,7 +1132,7 @@
             }, { once: true });
 
             window.addEventListener('resize', () => {
-                document.querySelectorAll('textarea, input[type="text"]').forEach(el => {
+                document.querySelectorAll('textarea').forEach(el => {
                     if (el.dataset.xmwAdaptiveBound) adjust(el);
                 });
             });
@@ -1050,6 +1169,121 @@
                 createLink.parentElement.insertAdjacentElement('afterend', li);
                 menu.style.gap = '8px';
             });
+        },
+    });
+
+    /* ---------- Markdown 渲染 ---------- */
+    Features.register({
+        id: 'markdown-render',
+        settings: [{
+            key: 'markdownRender', group: 'appearance', label: 'Markdown 渲染',
+            desc: '评论与作品简介支持 Markdown 显示', default: true, reload: true,
+        }],
+        setup() {
+            if (!Settings.get('markdownRender')) return;
+            injectPageCss();
+
+            // 评论区正文
+            Watcher.watch(SELECTORS.commentText, el => {
+                if (el.dataset.xmwMdRendered) return;
+                // 跳过输入区容器（如 comment-textarea，类名同样含 "comment-text"）
+                if (el.querySelector('textarea, input')) return;
+                renderElementMarkdown(el);
+            }, { once: true });
+
+            // 作品简介条目：标题不做处理，渲染其余内容块
+            Watcher.watch(SELECTORS.introItem, el => {
+                if (el.dataset.xmwMdRendered) return;
+                el.dataset.xmwMdRendered = '1';
+                const title = el.querySelector('[class*="intro-title"]');
+                const targets = title ? [...el.children].filter(child => child !== title) : [el];
+                for (const target of targets) renderElementMarkdown(target);
+            }, { once: true });
+        },
+    });
+
+    /* ---------- Markdown 编辑器 ---------- */
+    Features.register({
+        id: 'markdown-editor',
+        settings: [{
+            key: 'markdownEditor', group: 'appearance', label: 'Markdown 编辑器',
+            desc: '为多行文本框添加格式工具栏与预览', default: true, reload: true,
+        }],
+        setup() {
+            if (!Settings.get('markdownEditor')) return;
+            injectPageCss();
+
+            /** 在光标处应用 Markdown 语法并同步 React 状态 */
+            function applyAction(ta, action) {
+                const start = ta.selectionStart;
+                const end = ta.selectionEnd;
+                const value = ta.value;
+                let newValue, selStart, selEnd;
+                if (action.line) {
+                    // 行级语法：作用于光标所在行的行首，已有前缀则移除（切换）
+                    const lineStart = value.lastIndexOf('\n', start - 1) + 1;
+                    if (value.startsWith(action.line, lineStart)) {
+                        newValue = value.slice(0, lineStart) + value.slice(lineStart + action.line.length);
+                        selStart = selEnd = lineStart;
+                    } else {
+                        newValue = value.slice(0, lineStart) + action.line + value.slice(lineStart);
+                        selStart = selEnd = lineStart + action.line.length;
+                    }
+                } else {
+                    // 包裹语法：保留选中文本，光标/选区落在标记内
+                    const selected = value.slice(start, end);
+                    newValue = value.slice(0, start) + action.left + selected + action.right + value.slice(end);
+                    selStart = start + action.left.length;
+                    selEnd = selStart + selected.length;
+                }
+                // 必须走原生 setter 写回：setRangeText 绕过 React 的值追踪器，
+                // 受控组件会在下次提交时把修改回滚
+                setReactValue(ta, newValue);
+                ta.setSelectionRange(selStart, selEnd);
+                ta.focus();
+            }
+
+            Watcher.watch('textarea', ta => {
+                if (ta.dataset.xmwMdeBound) return;
+                if (ta.readOnly || ta.disabled) return;
+                ta.dataset.xmwMdeBound = '1';
+
+                let previewOpen = false;
+                const preview = h('div', { class: 'xmw-md-body xmw-mde-preview', hidden: true });
+                const toggleBtn = h('button', {
+                    class: 'xmw-mde-btn xmw-mde-toggle', type: 'button', title: '预览',
+                    onclick: () => setPreview(!previewOpen),
+                }, '预览');
+
+                function setPreview(open) {
+                    previewOpen = open;
+                    toggleBtn.classList.toggle('xmw-mde-active', open);
+                    toggleBtn.textContent = open ? '编辑' : '预览';
+                    if (open) {
+                        preview.innerHTML = renderMarkdown(ta.value);
+                        preview.hidden = false;
+                        ta.style.display = 'none';
+                    } else {
+                        preview.hidden = true;
+                        ta.style.display = '';
+                        ta.focus();
+                    }
+                }
+
+                const buttons = MDE_ACTIONS.map(action => h('button', {
+                    class: 'xmw-mde-btn', type: 'button', title: action.title,
+                    style: action.style || undefined,
+                    onclick: () => applyAction(ta, action),
+                }, action.label));
+
+                // 只插入相邻节点，不改动 textarea 自身的父子关系，避免破坏 React 协调
+                ta.insertAdjacentElement('beforebegin', h('div', { class: 'xmw-mde-bar' }, [...buttons, toggleBtn]));
+                ta.insertAdjacentElement('afterend', preview);
+
+                ta.addEventListener('input', () => {
+                    if (previewOpen) preview.innerHTML = renderMarkdown(ta.value);
+                });
+            }, { once: true });
         },
     });
 
@@ -2008,13 +2242,12 @@
             h('span', { class: 'xt-about-row__label' }, label),
             value);
         container.replaceChildren(
+            h('div', { class: 'xt-about-title' }, META.name),
             row('版本：', `v${META.version}`),
-            row('作者：', META.author),
+            row('作者：', h('a', { class: 'xt-link', href: META.authorLink, target: '_blank' }, META.author)),
             row('许可证：', META.license),
             row('项目主页：', h('a', { class: 'xt-link', href: META.repo, target: '_blank' }, META.repo)),
             row('问题反馈：', h('a', { class: 'xt-link', href: META.issues, target: '_blank' }, META.issues)),
-            ...META.friendLinks.map(link =>
-                row('推荐：', h('a', { class: 'xt-link', href: link.url, target: '_blank' }, link.label))),
         );
     }
 
@@ -2060,6 +2293,10 @@
         const content = h('div', { class: 'xt-settings__content' });
         const navItems = [];
         let currentGroupId = null;
+        let dirty = false;
+
+        // 事件委托：面板内开关 / 下拉的任何变更（change 事件会冒泡）都标记为已修改
+        content.addEventListener('change', () => { dirty = true; });
 
         const tabs = [...Settings.groups, { id: 'about', label: '关于' }];
         for (const group of tabs) {
@@ -2092,6 +2329,7 @@
             width: 640,
             content: h('div', { class: 'xt-settings' }, nav, content),
             footer: [hint, restoreButton],
+            onClose: askRefreshIfDirty,
         });
 
         activate(tabs[0].id);
@@ -2103,9 +2341,20 @@
             }).then(ok => {
                 if (!ok) return;
                 Settings.reset();
+                dirty = true;
                 UI.toast('已恢复默认设置', { type: 'success' });
                 renderSettingsGroup(content, currentGroupId);
             });
+        }
+
+        /** 面板关闭时：若有未生效的修改，询问是否立即刷新 */
+        function askRefreshIfDirty() {
+            if (!dirty) return;
+            UI.confirm({
+                title: '刷新页面',
+                message: '设置已更改，是否立即刷新页面使设置生效？',
+                okText: '刷新',
+            }).then(ok => { if (ok) location.reload(); });
         }
     }
 
