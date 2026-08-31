@@ -1,11 +1,18 @@
-# XMW Toolbox
+<p align="center">
+  <img src="./assets/readme/hero.svg" width="100%" alt="XMW Toolbox——把小码王每天重复的签到、点赞、收藏、发布、领奖，交给一颗可拖动的悬浮球">
+</p>
 
-为 [小码王](https://world.xiaomawang.com) 定制的 Tampermonkey 用户脚本，把每天重复的签到、点赞、收藏、发布和领奖，以及烦人的红点角标，都交给它。基于 [XMWplus](https://github.com/RSPqfgn/XMWplus) 重构而来，两分钟装好即用。
+为 [小码王](https://world.xiaomawang.com) 定制的 [Tampermonkey](https://www.tampermonkey.net/) 用户脚本：自动任务接管每日重复操作，界面定制清理红点与杂乱元素。基于 [XMWplus](https://github.com/RSPqfgn/XMWplus) 重构而来，两分钟装好即用。
 
 ## 它替你做什么
 
 - **自动任务**：在面板中勾选任务（每日签到 / 点赞 / 收藏 / 每周作品发布），在独立的标签页内自动完成并领取奖励；执行时会提示进度，可随时中止。全程在**单个标签页内跨页面推进**，无需逐页手动操作。
-- **后台自动**：自动领取奖励、自动签到、自动展开评论 / 子回复、自动点击「查看更多」。
+
+<p align="center">
+  <img src="./assets/readme/auto-task-flow.svg" width="100%" alt="自动任务流程：打开悬浮球 → 勾选任务 → 开始执行 → 单标签页自动跨页面推进 → 领奖并汇报">
+</p>
+
+- **后台自动**：自动领取奖励、自动签到、自动展开评论 / 子回复（按钮进入屏幕后才触发，避免卡顿）、自动点击「查看更多」。
 - **一键查询**：按 ID 查询用户 / 作品 / 工作室信息，支持快速跳转。
 - **界面定制**：消息 / 动态 / 任务中心免打扰、移除头像框与魔力测评、自适应文本框、作品菜单「编辑信息」入口。
 - **Markdown**：评论与作品简介支持 Markdown 渲染显示；为多行文本框添加 Markdown 格式工具栏与预览。
@@ -54,4 +61,3 @@
 - 基于 [XMWplus](https://github.com/RSPqfgn/XMWplus) 进行了重构。
 - 添加了自动任务功能。
 - 原顶栏的“XMWplus”按钮移除，改为了悬浮球，可在设置中关闭。
-
